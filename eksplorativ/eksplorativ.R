@@ -29,240 +29,153 @@ data <- mlfintester::historical_data(
 
 
 equity_list <- list(
-  GOOG  = IBrokers::twsEquity("GOOG"),
-  GOOGL = IBrokers::twsEquity("GOOGL")
+  # GOOG  = IBrokers::twsEquity("GOOG"),
+  # GOOGL = IBrokers::twsEquity("GOOGL"),
+  PEP = IBrokers::twsEquity("PEP"),
+  KO = IBrokers::twsEquity("KO")
 )
 
 
 
-data <- mlfintester::historical_data_multi(conn,
+dat <- mlfintester::historical_data_multi(conn,
                                    equity_list,
-                                   barSize = "1 hour",
-                                   duration = "1 W")
+                                   barSize = "1 day",
+                                   duration = "15 Y")
 
 
-# eksempel ----------------------------------------------------------------
+data <- dat
 
-
-library(mlr3verse)
-library(mlr3resampling)
-library(mlr3temporal)
-library(dplyr)
-library(mlr3pipelines)
-library(mlr3tuning)
-library(slider)
-library(tidyr)
-
-data.table::setDTthreads(0)
-
-
-dt <- data %>%
-  arrange(index) %>%
-  mutate(
-    ret_1  = TTR::ROC(AAPL.Close, n = 1, type = "discrete"),
-    ret_2  = TTR::ROC(AAPL.Close, n = 2, type = "discrete"),
-    sma20  = TTR::SMA(AAPL.Close, n = 20),
-    log_ret = log(AAPL.Close/lag(AAPL.Close))
-  ) %>%
-  mutate(
-    roll_sd30 = slide_dbl(log_ret, ~ sd(.x, na.rm = TRUE),
-                          .before = 29, .complete = TRUE),
-    mom1      = ret_1,                                        # H1
-    mr_flag   = if_else(abs(ret_1) > 2*roll_sd30, 1, 0),      # H2
-    sma_diff  = (AAPL.Close/sma20) - 1                        # H3
-  ) %>%
-  drop_na() %>%
-  mutate(
-    target = as.factor(if_else(lead(ret_1) > 0, 1, 0))        # NÆSTE dags ret = label!
-  ) %>%
-  drop_na(target)
-
-
-### mlr3 task
-
-
-library(mlr3verse)     # mlr3, mlr3tuning, mlr3pipelines, paradox ...
-library(mlr3forecast)
-library(paradox)
-
-# Lav en kopi du kan altid vende tilbage til
-dt_ml <- dt
-
-task <- TaskClassif$new(
-  id       = "AAPL_cls",
-  backend  = dt_ml,
-  target   = "target",
-  positive = "1"
-)
-
-# Brug index som tids-akse, men IKKE som feature
-task$col_roles$order   <- "index"
-task$col_roles$feature <- setdiff(task$col_roles$feature, "index")
-
-
-### pipeline
-
-
-pl <- po("datefeatures", keep_date_var = FALSE) %>>%
-  po("scale")
-
-
-### learners + tuning
-
-
-# --- XGBoost + tuning ---------------------------------------------------
-lrn_xgb <- lrn("classif.xgboost",
-               predict_type = "prob",
-               objective    = "binary:logistic",
-               eval_metric  = "logloss",
-               booster      = "gbtree")
-
-ps_xgb <- ps(
-  nrounds            = p_int(100, 600),
-  eta                = p_dbl(0.01, 0.4),
-  max_depth          = p_int(3, 8),
-  subsample          = p_dbl(0.5, 1),
-  colsample_bytree   = p_dbl(0.5, 1),
-  min_child_weight   = p_int(1, 10),
-  gamma              = p_dbl(0, 5)
-)
-
-at_xgb <- AutoTuner$new(
-  learner      = lrn_xgb,
-  resampling   = rsmp("cv", folds = 8),     # inner-CV
-  measure      = msr("classif.bacc"),
-  tuner        = tnr("grid_search"),        # brug evt. "random_search" hvis du vil brede dig mere
-  search_space = ps_xgb,
-  terminator   = trm("evals", n_evals = 50) # ~50 grid-punkter
-)
-
-lrn_glm <- lrn("classif.log_reg", predict_type = "prob")
-
-glrn_xgb <- GraphLearner$new(pl %>>% at_xgb, id = "xgboost_tuned")
-glrn_glm <- GraphLearner$new(pl %>>% lrn_glm, id = "glm_baseline")
-
-learners <- list(glrn_xgb, glrn_glm)
-
-
-### cv
-
-outer <- rsmp("forecast_cv",
-              folds        = 5,
-              window_size  = 252 * 2,   # ca 2 år
-              horizon      = 20,        # ca 1 måned
-              fixed_window = TRUE)
-outer$instantiate(task)
-
-### benchmark
-
-design <- benchmark_grid(
-  tasks       = task,
-  learners    = learners,
-  resamplings = outer
-)
-
-bmr <- benchmark(design, store_models = TRUE)
-
-
-### evaluation
-agg_bacc <- bmr$aggregate(msr("classif.bacc"))
-print(agg_bacc)
-
-autoplot(bmr, type = "boxplot")      # error-rate / bacc diff pr fold
-autoplot(bmr, type = "roc")
-autoplot(bmr, type = "prc")
-
-### oos-pred
-
-get_oof_probs <- function(bmr_obj, learner_id, positive = "1") {
-  btmp <- bmr_obj$clone(deep = TRUE)
-  btmp$filter(learner_ids = learner_id)
-  # her har vi kun 1 task i designet, så resample_result(1) er sikkert:
-  rr   <- btmp$resample_result(1)
-  pred <- rr$prediction()
-  tibble(
-    row_id = pred$row_ids,
-    prob_1 = pred$prob[, positive]
-  )
+for (nm in names(data)) {
+  data[[nm]] <- data[[nm]] %>%
+    dplyr::arrange(index) %>%
+    dplyr::mutate(
+      log_return = base::log(
+        .data[[paste0(nm,".Close")]] /
+          dplyr::lag(.data[[paste0(nm,".Close")]])),
+      VOL20 = TTR::runSD(log_return, n = 14),
+      TTR::ATR(
+        cbind(
+          High  = .data[[ paste0(nm, ".High") ]],
+          Low   = .data[[ paste0(nm, ".Low")  ]],
+          Close = .data[[ paste0(nm, ".Close")]]
+        ),
+        n = 14
+      )[, "atr"]
+         ) %>%
+    na.omit()
 }
 
-oof_list <- lapply(learners, function(lrn) {
-  get_oof_probs(bmr, lrn$id, positive = task$positive)
-})
-names(oof_list) <- sapply(learners, `[[`, "id")
+pair_list <- utils::combn(names(data), 2, simplify = FALSE)
+calc_pair_kf <- function(pair) {
 
-library(purrr)
-oof_long <- imap_dfr(oof_list, ~ mutate(.x, learner = .y))
+  sym1 <- pair[1]
+  sym2 <- pair[2]
+  df1 <- data[[sym1]]
+  df2 <- data[[sym2]]
 
-### join på data oprindeligt
-
-
-
-dt_pnl <- dt_ml %>%
-  mutate(row_id = row_number(),
-         ret_next = lead(ret_1)) %>%
-  select(row_id, index, ret_1, ret_next, everything())
-
-# merge OOS probs
-eval_dt <- oof_long %>%
-  left_join(dt_pnl, by = "row_id") %>%
-  arrange(learner, index)
-
-
-
-### strategi
-
-fee    <- 0.0002   # 2 bp
-thresh <- 0.51
-
-eval_dt <- eval_dt %>%
-  group_by(learner) %>%
-  mutate(
-    signal   = if_else(prob_1 > thresh, 1L, 0L),      # long/flat
-    ret_next = replace_na(ret_next, 0),
-    trade_ret= signal * ret_next,
-    cost     = fee * abs(signal - lag(signal, default = 0)),
-    strat_ret= trade_ret - cost,
-    eq_curve = cumsum(replace_na(strat_ret, 0))
-  ) %>%
-  ungroup()
-
-
-### performance
-
-library(PerformanceAnalytics)
-perf <- eval_dt %>%
-  group_by(learner) %>%
-  summarise(
-    trades     = sum(signal == 1),
-    hit_rate   = mean(ret_next > 0 & signal == 1, na.rm = TRUE),
-    mean_ret   = mean(strat_ret, na.rm = TRUE),
-    sd_ret     = sd(strat_ret,   na.rm = TRUE),
-    sharpe_ann = (mean_ret / sd_ret) * sqrt(252),
-    max_dd     = {
-      pnl_xts <- xts::xts(strat_ret, order.by = index)
-      PerformanceAnalytics::maxDrawdown(pnl_xts)[[1]]
-    },
-    .groups = "drop"
+  p1 <- df1[[paste0(sym1, ".Close")]]
+  p2 <- df2[[paste0(sym2, ".Close")]]
+  idx <- df1[["index"]]
+  mod <- dlm::dlmModReg(
+    X = p2,
+    dV = 1e-4,
+    dW = c(1e-5, 1e-5)
   )
-print(perf)
+  out <- dlm::dlmFilter(p1, mod)
+  st <- dlm::dropFirst(out$m)
+  alpha <- st[, 1]
+  beta <- st[, 2]
+  spread <- p1 - alpha - beta * p2
+  w1 <- rep(1, length(beta))
+  w2 <- -beta
+  tibble::tibble(
+    sym1    = sym1,
+    sym2    = sym2,
+    p1 = p1,
+    p2 = p2,
+    index   = idx,       # første state er initial og droppes
+    alpha   = alpha,
+    beta    = beta,
+    spread  = spread,
+    w1      = w1,
+    w2      = w2
+  )
 
-### equity
-library(ggplot2)
-ggplot(eval_dt, aes(x = index, y = eq_curve, colour = learner)) +
-  geom_line() +
-  labs(title = "OOS equity curves", x = NULL, y = "Cum. return") +
-  theme_minimal()
+}
+
+
+pair_results <- purrr::map_dfr(pair_list, calc_pair_kf)
 
 
 
-dt_gap <- dt %>%
-  mutate(
-    gap_pct = (AAPL.Open / lag(AAPL.Close) - 1),
-    trade   = if_else(gap_pct < -0.02, 1, 0),
-    profit  = trade * (AAPL.Close / AAPL.Open - 1) - fee*trade
+window    <- 20
+entry_z   <- 2.5
+exit_z    <- 0.5
+
+signals <- pair_results %>%
+  dplyr::arrange(sym1, sym2, index) %>%
+  dplyr::group_by(sym1, sym2) %>%
+  dplyr::mutate(
+    ma_spread = TTR::runMean(spread, n = window),
+    sd_spread = TTR::runSD  (spread, n = window),
+    zscore    = (spread - ma_spread) / sd_spread,
+    raw_sig   = dplyr::case_when(
+      zscore >  entry_z ~ -1,
+      zscore < -entry_z ~ +1,
+      abs(zscore) < exit_z ~  0,
+      TRUE               ~ NA_real_
+    )
   ) %>%
-  na.omit()
+  tidyr::fill(raw_sig, .direction = "down") %>%
+  dplyr::mutate(signal = tidyr::replace_na(raw_sig, 0)) %>%
+  dplyr::ungroup()
+
+
+signals <- signals %>%
+  dplyr::group_by(sym1, sym2) %>%
+  dplyr::mutate(pos = dplyr::lag(signal, default = 0)) %>%  # position = gårsdagens signal
+  dplyr::ungroup()
+
+
+signals_ret <- signals %>%
+  dplyr::group_by(sym1, sym2) %>%
+  dplyr::mutate(
+    d_spread  = spread - dplyr::lag(spread),
+    strat_ret = pos * d_spread,                # PnL ≈ Δ-spread
+    strat_ret = tidyr::replace_na(strat_ret, 0),
+    cum_ret   = cumsum(strat_ret)
+  ) %>%
+  dplyr::ungroup()
+
+
+
+signals_dd <- signals_ret %>%                    # <- din equity-tibble
+  dplyr::group_by(sym1, sym2) %>%                # (kun PEP / KO i dit setup)
+  dplyr::mutate(
+    run_max   = base::cummax(cum_ret),           # højeste lgn. equity til dato
+    dd_log    = cum_ret - run_max,               # ≤ 0 (log-afkast)
+    dd_pct    = base::exp(cum_ret) /
+                base::exp(run_max) - 1           # drawdown i %
+  ) %>%
+  dplyr::ungroup()
+
+dd_stats <- signals_dd %>%                       # én række, fordi ét par
+  dplyr::summarise(
+    max_dd_log = base::min(dd_log),
+    max_dd_pct = base::min(dd_pct)
+  )
+
+
+p3 <- ggplot2::ggplot(signals_dd,
+        ggplot2::aes(index, dd_pct)) +
+  ggplot2::geom_area(fill = "firebrick") +
+  ggplot2::scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  ggplot2::labs(
+    y     = "Drawdown (%)",
+    x     = "Tid",
+    title = "Strategi-drawdown (PEP‒KO)"
+  ) +
+  ggplot2::theme_minimal()
 
 
 
@@ -270,17 +183,43 @@ dt_gap <- dt %>%
 
 
 
+p1 <- ggplot2::ggplot(signals_ret, ggplot2::aes(x = index, y = zscore)) +
+  ggplot2::geom_line() +
+  ggplot2::geom_hline(yintercept = c(-entry_z, entry_z), linetype = "dashed") +
+  ggplot2::geom_hline(yintercept = c(-exit_z,  exit_z),  linetype = "dotted") +
+  ggplot2::geom_point(
+    data = dplyr::filter(signals_ret, signal ==  1),
+    ggplot2::aes(x = index, y = zscore),
+    color = "blue", size = 1.5
+  ) +
+  ggplot2::geom_point(
+    data = dplyr::filter(signals_ret, signal == -1),
+    ggplot2::aes(x = index, y = zscore),
+    color = "red",  size = 1.5
+  ) +
+  ggplot2::labs(
+    y = "Z-score", x = NULL,
+    title = "Z-score & signalpunkter"
+  ) +
+  ggplot2::theme_minimal()
 
 
+p2 <- ggplot2::ggplot(signals_ret, ggplot2::aes(x = index, y = cum_ret)) +
+  ggplot2::geom_line() +
+  ggplot2::labs(
+    y     = "Cumuleret log-return",
+    x     = "Tid",
+    title = "Strategi-equity curve"
+  ) +
+  ggplot2::theme_minimal()
 
-
-
-
-
-
-
-
-
+patchwork::wrap_plots(
+  p1,                      # z-score & signalpunkter (fra før)
+  p2,                      # equity-kurven (fra før)
+  p3,                      # nyt draw-down-panel
+  ncol    = 1,
+  heights = c(2, 1, 1)
+)
 
 
 
