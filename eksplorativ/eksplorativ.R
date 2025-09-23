@@ -6,7 +6,7 @@ IBrokers::twsDisconnect(conn)
 
 
 conn <- mlfintester::conn(1,
-                  4002,
+                  4001,
                   verbose = FALSE)
 
 
