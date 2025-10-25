@@ -2,6 +2,7 @@
 
 export(HMM_1)
 export(backtest_coint)
+export(backtest_coint_v2)
 export(best_box_spread)
 export(conn)
 export(get_filtered_probs)
